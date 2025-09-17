@@ -8,40 +8,34 @@ from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 import re
 
-# ----------------- CONFIG -----------------
 st.set_page_config(page_title="PubMed Hot Topics HF", layout="wide")
 st.title("🔍 PubMed Hot Topics Explorer (Hugging Face NER)")
 
-# ----------------- INPUTS -----------------
 query = st.text_area(
     "PubMed Search Query", 
     value='("Endocrinology" OR "Diabetes") AND 2024/10/01:2025/06/28[Date - Publication]'
 )
-max_results = st.number_input("Max number of articles", min_value=10, max_value=500, value=100, step=10)
+max_results = st.number_input("Max number of articles", min_value=10, max_value=500, value=50, step=10)
 hf_token = st.text_input("Hugging Face API Token", type="password")
 hf_model = "d4data/biobert-cased-finetuned-ner"
 
-# Pré-carregado: palavras médicas genéricas a serem ignoradas
 generic_terms = set([
     "study", "patient", "patients", "trial", "results", "effect", "effects",
     "group", "clinical", "analysis", "evaluation", "treatment", "data"
 ])
 
-# ----------------- RUN -----------------
 if st.button("🔎 Run Analysis"):
     with st.spinner("Fetching articles..."):
-        # 1️⃣ Buscar PMIDs
+        # Buscar PMIDs
         esearch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
         params = {"db": "pubmed", "retmax": str(max_results), "retmode": "json", "term": query}
         r = requests.get(esearch_url, params=params)
         id_list = r.json()["esearchresult"].get("idlist", [])
 
-        # 2️⃣ Fetch XML
         efetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
         params = {"db": "pubmed", "id": ",".join(id_list), "retmode": "xml"}
         response = requests.get(efetch_url, params=params, timeout=20)
 
-        # 3️⃣ Parse XML
         records = []
         try:
             root = ET.fromstring(response.content)
@@ -52,36 +46,32 @@ if st.button("🔎 Run Analysis"):
                 link = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
                 journal = article.findtext(".//Journal/Title", "")
                 date = article.findtext(".//PubDate/Year") or article.findtext(".//PubDate/MedlineDate") or "N/A"
-                records.append({
-                    "PMID": pmid, "Title": title, "Link": link,
-                    "Journal": journal, "Date": date
-                })
+                records.append({"PMID": pmid, "Title": title, "Link": link, "Journal": journal, "Date": date})
         except:
             st.error("Failed to parse PubMed XML.")
 
         df = pd.DataFrame(records)
 
-        # ----------------- HUGGING FACE NER -----------------
+        # Hugging Face NER
         def get_entities(text):
-            if not hf_token:
+            if not hf_token or not text.strip():
                 return []
             headers = {"Authorization": f"Bearer {hf_token}"}
             payload = {"inputs": text}
             try:
-                r = requests.post(f"https://api-inference.huggingface.co/models/{hf_model}", headers=headers, json=payload, timeout=30)
+                r = requests.post(f"https://api-inference.huggingface.co/models/{hf_model}",
+                                  headers=headers, json=payload, timeout=30)
                 if r.status_code == 200:
                     ents = r.json()
-                    # Filtra apenas palavras e remove genéricas
                     return [e['word'] for e in ents if 'word' in e and e['word'].lower() not in generic_terms]
-                else:
-                    return []
             except:
                 return []
+            return []
 
         st.info("Running Hugging Face NER on article titles...")
         df['entities'] = df['Title'].apply(get_entities)
 
-        # ----------------- BIGRAM/TRIGRAM -----------------
+        # N-grams
         def get_ngrams(entity_lists, n=2):
             ngrams = []
             for entities in entity_lists:
@@ -92,33 +82,26 @@ if st.button("🔎 Run Analysis"):
         bigrams = get_ngrams(df['entities'], n=2)
         trigrams = get_ngrams(df['entities'], n=3)
 
-        # ----------------- WORDCLOUD -----------------
-        all_words = list(chain.from_iterable(df['entities']))
-        if all_words:
-            word_freq = Counter(all_words)
-            st.subheader("Wordcloud - Single Words")
-            wc = WordCloud(width=800, height=400, background_color='white').generate_from_frequencies(word_freq)
-            plt.figure(figsize=(15,6))
-            plt.imshow(wc, interpolation='bilinear')
-            plt.axis('off')
-            st.pyplot(plt)
+        # Wordcloud function
+        def plot_wordcloud(words, title):
+            if words:
+                word_freq = Counter(words)
+                wc = WordCloud(width=800, height=400, background_color='white').generate_from_frequencies(word_freq)
+                plt.figure(figsize=(15,6))
+                plt.imshow(wc, interpolation='bilinear')
+                plt.axis('off')
+                st.subheader(title)
+                st.pyplot(plt)
+                plt.close()
+            else:
+                st.info(f"No entities found to generate {title}.")
 
-        if bigrams:
-            st.subheader("Wordcloud - Bigrams")
-            wc2 = WordCloud(width=800, height=400, background_color='white').generate_from_frequencies(Counter(bigrams))
-            plt.figure(figsize=(15,6))
-            plt.imshow(wc2, interpolation='bilinear')
-            plt.axis('off')
-            st.pyplot(plt)
+        plot_wordcloud(list(chain.from_iterable(df['entities'])), "Wordcloud - Single Words")
+        plot_wordcloud(bigrams, "Wordcloud - Bigrams")
+        plot_wordcloud(trigrams, "Wordcloud - Trigrams")
 
-        if trigrams:
-            st.subheader("Wordcloud - Trigrams")
-            wc3 = WordCloud(width=800, height=400, background_color='white').generate_from_frequencies(Counter(trigrams))
-            plt.figure(figsize=(15,6))
-            plt.imshow(wc3, interpolation='bilinear')
-            plt.axis('off')
-            st.pyplot(plt)
-
-        # ----------------- EXPORT -----------------
+        # DataFrame e CSV
+        st.subheader("Article Table")
+        st.dataframe(df[['PMID','Title','Journal','Date','entities']], use_container_width=True)
         csv = df.to_csv(index=False)
         st.download_button("⬇️ Download CSV", data=csv, file_name="pubmed_entities.csv", mime="text/csv")
